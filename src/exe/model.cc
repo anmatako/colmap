@@ -34,7 +34,9 @@
 #include "base/pose.h"
 #include "base/similarity_transform.h"
 #include "estimators/coordinate_frame.h"
+#include "util/bitmap.h"
 #include "util/misc.h"
+#include "util/threading.h"
 #include "util/option_manager.h"
 
 namespace colmap {
@@ -344,6 +346,129 @@ int RunModelConverter(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  return EXIT_SUCCESS;
+}
+
+int RunModelCoverage(int argc, char** argv) {
+  Timer timer;
+  timer.Start();
+
+  std::string input_path;
+  std::string output_path;
+  std::string bbox_path;
+  int num_threads = -1;
+  int threshold = 4;
+  int pixel_budget = 2 * 1024 * 1024;  // 2 MP resolution
+
+  OptionManager options;
+  options.AddRequiredOption("input_path", &input_path);
+  options.AddRequiredOption("output_path", &output_path);
+  options.AddRequiredOption("bbox_path", &bbox_path);
+  options.AddDefaultOption("num_threads", &num_threads);
+  options.AddDefaultOption("threshold", &threshold);
+  options.AddDefaultOption("pixel_budget", &pixel_budget);
+  options.Parse(argc, argv);
+
+  if (!ExistsDir(input_path)) {
+    std::cerr << "ERROR: `input_path` is not a directory" << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  if (!ExistsDir(output_path)) {
+    std::cerr << "ERROR: `output_path` is not a directory" << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  PrintHeading1("Creating model coverage image");
+  Reconstruction reconstruction;
+  reconstruction.Read(input_path);
+
+  std::pair<Eigen::Vector3d, Eigen::Vector3d> bounds;
+  if (!bbox_path.empty()) {
+    std::ifstream file(bbox_path);
+    if (file.is_open()) {
+      file >> bounds.first(0) >> bounds.first(1) >> bounds.first(2);
+      file >> bounds.second(0) >> bounds.second(1) >> bounds.second(2);
+      file.close();
+    } else {
+      std::cout << "ERROR: Invalid bound_coords path: \"" << bbox_path
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+  } else {
+    reconstruction.ComputeBoundingBox();
+  }
+  Eigen::Vector3d extent = bounds.second - bounds.first;
+
+  // write boundary PNG mask and calculate covered area
+  num_threads = GetEffectiveNumThreads(num_threads);
+  std::vector<int> covered_pixels(num_threads, 0);
+  ThreadPool thread_pool(num_threads);
+
+  std::string path = JoinPaths(output_path, "boundary.png");
+  double aspect_ratio = extent.x() / extent.y();
+  int height = (int)(sqrt(pixel_budget / aspect_ratio) + .5f);
+  int width = (int)(aspect_ratio * height);
+  Eigen::Vector2d step(extent.x() / width, extent.y() / height);
+  Bitmap mask;
+  mask.Allocate(width, height, false);
+
+  auto CalculateCoverage = [&](int row) {
+    for (int col = 0; col < width; ++col) {
+      Eigen::Vector3d plane_point(bounds.first.x() + col * step.x(),
+                                  bounds.first.y() + row * step.y(), 0.0);
+      int count = 0;
+      for (image_t im_id : reconstruction.RegImageIds()) {
+        const Image& img = reconstruction.Image(im_id);
+        const Camera& cam = reconstruction.Camera(img.CameraId());
+        Eigen::Vector2d im_point =
+            ProjectPointToImage(plane_point, img.ProjectionMatrix(), cam);
+        if (im_point.x() >= 0 && im_point.x() < cam.Width() &&
+            im_point.y() >= 0 && im_point.y() < cam.Height()) {
+          count++;
+        }
+      }
+      if (count > threshold) {
+        covered_pixels[thread_pool.GetThreadIndex()]++;
+      }
+      uint8_t color_val = count > threshold ? 0 : 255;
+      mask.SetPixel(col, row, BitmapColor<uint8_t>(color_val));
+    }
+  };
+
+  for (int row = 0; row < height; ++row) {
+    thread_pool.AddTask(CalculateCoverage, row);
+  }
+  thread_pool.Wait();
+
+  int num_covered_pixels = 0;
+  for (int num_pixels : covered_pixels) {
+    num_covered_pixels += num_pixels;
+  }
+  double coverage_area = num_covered_pixels * step.x() * step.y();
+  mask.Write(path, FIF_PNG, PNG_Z_BEST_COMPRESSION);
+
+  path = JoinPaths(output_path, "boundary.json");
+  std::ofstream file(path, std::ios::trunc);
+  CHECK(file.is_open()) << path;
+
+  // Ensure that we don't loose any precision by storing in text.
+  file.precision(8);
+  file << "{" << std::endl;
+  file << "  \"CoverageArea\": " << coverage_area << "," << std::endl;
+  file << "  \"PlaneArea\": " << extent.x() * extent.y() << "," << std::endl;
+  file << "  \"PlaneCoefficients\": [0, 0, 1, 0]," << std::endl;
+  file << "  \"PlaneOrigin\": [0, 0, 0]," << std::endl;
+  file << "  \"PlaneBasis1\": [1, 0, 0]," << std::endl;
+  file << "  \"PlaneBasis2\": [0, 1, 0]," << std::endl;
+  file << "  \"PlaneCorners\": [" << bounds.first.x() << ", "
+       << bounds.first.y() << ", " << bounds.second.x() << ", "
+       << bounds.second.y() << "]," << std::endl;
+  file << "}" << std::endl;
+  file.close();
+
+  std::cout << "=> Writing coverage succeeded" << std::endl;
+  timer.PrintMinutes();
   return EXIT_SUCCESS;
 }
 

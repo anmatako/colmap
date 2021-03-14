@@ -124,6 +124,7 @@ int main(int argc, char** argv) {
   commands.emplace_back("model_analyzer", &RunModelAnalyzer);
   commands.emplace_back("model_comparer", &RunModelComparer);
   commands.emplace_back("model_converter", &RunModelConverter);
+  commands.emplace_back("model_coverage", &RunModelCoverage);
   commands.emplace_back("model_merger", &RunModelMerger);
   commands.emplace_back("model_orientation_aligner",
                         &RunModelOrientationAligner);

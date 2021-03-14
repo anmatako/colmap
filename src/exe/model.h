@@ -35,6 +35,7 @@ int RunModelAligner(int argc, char** argv);
 int RunModelAnalyzer(int argc, char** argv);
 int RunModelComparer(int argc, char** argv);
 int RunModelConverter(int argc, char** argv);
+int RunModelCoverage(int argc, char** argv);
 int RunModelMerger(int argc, char** argv);
 int RunModelOrientationAligner(int argc, char** argv);
 
